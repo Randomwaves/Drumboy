@@ -1,0 +1,24 @@
+{
+    "Header": {
+        "Comment": "All values are metric (mm)",
+        "CreationDate": "2025-02-18T12:40:27Z",
+        "GenerationSoftware": {
+            "Application": "EAGLE",
+            "Vendor": "Autodesk",
+            "Version": "9.6.2"
+        },
+        "Part": "Single"
+    },
+    "Overall": {
+        "BoardThickness": 1.57,
+        "LayerNumber": 2,
+        "Name": {
+            "ProjectId": "Drumboy-Top"
+        },
+        "Owner": "Ceren Zeynep Pirim <eeyurdakul@yahoo.com>",
+        "Size": {
+            "X": 210,
+            "Y": 95
+        }
+    }
+}

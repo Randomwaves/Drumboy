@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 0)
+  (lib (name "Bottom-eagle-import")(type "KiCad")(uri "${KIPRJMOD}/Bottom-eagle-import.kicad_sym")(options "")(descr ""))
+)

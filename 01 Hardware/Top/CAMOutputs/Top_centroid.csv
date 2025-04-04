@@ -1,0 +1,46 @@
+Screaming Circuits SMD component position file.
+Created by Centroid_ScreamingCircuits_smd.ulp 1.2.0.
+
+Centroid Data for pc board: "Drumboy-Top.brd" as of: 22.01.2025 17:27
+Measurements are in inches. Comma delimited
+Only surface mount components included
+
+RefDes,Layer,LocationX,LocationY,Rotation
+C1,Bottom,-2.795,0.394,180
+C2,Bottom,-3.386,0.236,0
+C3,Bottom,-3.386,0.394,0
+C4,Bottom,-2.795,0.453,180
+C5,Bottom,-2.795,0.335,180
+C6,Bottom,-3.386,0.669,0
+C7,Bottom,-3.386,0.571,0
+C8,Bottom,-3.386,0.512,0
+C9,Bottom,3.386,0.394,180
+C10,Bottom,2.795,0.236,0
+C11,Bottom,2.795,0.394,0
+C12,Bottom,3.386,0.453,180
+C13,Bottom,3.386,0.335,180
+C14,Bottom,2.795,0.669,0
+C15,Bottom,2.795,0.571,0
+C16,Bottom,2.795,0.512,0
+C17,Bottom,2.323,-1.319,180
+C18,Bottom,1.732,-1.496,0
+C19,Bottom,1.732,-1.378,0
+C20,Bottom,2.323,-1.260,180
+C21,Bottom,2.323,-1.378,180
+C22,Bottom,2.323,-1.142,180
+C23,Bottom,1.732,-1.142,0
+C24,Bottom,1.732,-1.201,0
+IC1,Bottom,-3.091,0.413,0
+IC2,Bottom,3.091,0.413,0
+IC3,Bottom,2.028,-1.299,0
+J2,Bottom,1.161,-1.309,90
+R1,Bottom,-2.795,0.512,0
+R2,Bottom,-3.386,0.335,180
+R3,Bottom,-3.386,0.453,180
+R4,Bottom,3.386,0.512,0
+R5,Bottom,2.795,0.335,180
+R6,Bottom,2.795,0.453,180
+R7,Bottom,1.732,-1.260,180
+R8,Bottom,1.732,-1.437,180
+R9,Bottom,2.323,-1.201,0
+R10,Bottom,1.732,-1.319,180
