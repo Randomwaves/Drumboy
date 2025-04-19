@@ -308,19 +308,16 @@ void Controller::receiveMidiCommand() {
         } else if (system.midi.rxNoteOnReadStage == 2) {
             system.midi.rxNoteOnVelocity = rxData;
             system.midi.rxNoteOnReadStage = 0;
-            system.midi.rxNoteOnWriteFlag = 1;
-        }
-
-        // note off
-        if ((system.midi.rxNoteOffReadStage == 0) && (rxData == (0x80 + system.midi.rxChannel))) {
-            system.midi.rxNoteOffReadStage = 1;
-        } else if (system.midi.rxNoteOffReadStage == 1) {
-            system.midi.rxNoteOffKey = rxData;
-            system.midi.rxNoteOffReadStage = 2;
-        } else if (system.midi.rxNoteOffReadStage == 2) {
             system.midi.rxNoteOffVelocity = rxData;
-            system.midi.rxNoteOffReadStage = 0;
-            system.midi.rxNoteOffWriteFlag = 1;
+            if (system.midi.rxNoteOffVelocity == 0) {
+                // Treat as note off
+                system.midi.rxNoteOffKey = system.midi.rxNoteOnKey;
+                system.midi.rxNoteOffVelocity = 0;
+                system.midi.rxNoteOffWriteFlag = 1;
+            } else {
+                // Normal note on
+                system.midi.rxNoteOnWriteFlag = 1;
+            }
         }
     }
 }
