@@ -10,7 +10,6 @@
 #include "sdmmc.h"
 #include "string.h"
 #include "tim.h"
-#include "usart.h"
 
 extern "C" void SystemClock_Config();
 extern "C" void PeriphCommonClock_Config();
@@ -126,11 +125,6 @@ extern "C" void System_Initialize() {
     MX_FATFS_Init();
     MX_I2C3_Init();
     MX_I2S3_Init();
-    MX_SDMMC2_SD_Init();
-    MX_UART4_Init();
-    MX_UART7_Init();
-    MX_USART1_UART_Init();
-    MX_USART6_UART_Init();
     MX_TIM6_Init();
     MX_TIM7_Init();
     MX_TIM13_Init();

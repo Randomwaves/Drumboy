@@ -47,7 +47,7 @@ void MX_I2S3_Init(void)
   hi2s3.Init.CPOL = I2S_CPOL_LOW;
   hi2s3.Init.FirstBit = I2S_FIRSTBIT_MSB;
   hi2s3.Init.WSInversion = I2S_WS_INVERSION_DISABLE;
-  hi2s3.Init.Data24BitAlignment = I2S_DATA_24BIT_ALIGNMENT_RIGHT;
+  hi2s3.Init.Data24BitAlignment = I2S_DATA_24BIT_ALIGNMENT_LEFT;
   hi2s3.Init.MasterKeepIOState = I2S_MASTER_KEEP_IO_STATE_DISABLE;
   if (HAL_I2S_Init(&hi2s3) != HAL_OK)
   {
@@ -100,8 +100,8 @@ void HAL_I2S_MspInit(I2S_HandleTypeDef* i2sHandle)
     hdma_spi3_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
     hdma_spi3_tx.Init.PeriphInc = DMA_PINC_DISABLE;
     hdma_spi3_tx.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_spi3_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
-    hdma_spi3_tx.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
+    hdma_spi3_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
+    hdma_spi3_tx.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
     hdma_spi3_tx.Init.Mode = DMA_CIRCULAR;
     hdma_spi3_tx.Init.Priority = DMA_PRIORITY_VERY_HIGH;
     hdma_spi3_tx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
@@ -113,7 +113,7 @@ void HAL_I2S_MspInit(I2S_HandleTypeDef* i2sHandle)
     __HAL_LINKDMA(i2sHandle,hdmatx,hdma_spi3_tx);
 
     /* I2S3 interrupt Init */
-    HAL_NVIC_SetPriority(SPI3_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(SPI3_IRQn, 0, 1);
     HAL_NVIC_EnableIRQ(SPI3_IRQn);
   /* USER CODE BEGIN SPI3_MspInit 1 */
 
@@ -156,3 +156,4 @@ void HAL_I2S_MspDeInit(I2S_HandleTypeDef* i2sHandle)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
+

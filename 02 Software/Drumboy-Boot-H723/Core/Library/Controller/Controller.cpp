@@ -440,7 +440,27 @@ void Controller::dac_initialize() {
 /* Sd functions --------------------------------------------------------------*/
 
 void Controller::sd_initialize() {
+    const uint32_t kDetectSettleMs = 20;
+
+    if (sd_detect() == SD_OK) {
+        HAL_Delay(kDetectSettleMs);
+    }
+
+    if (sd_detect() == SD_OK) {
+        MX_SDMMC2_SD_Init();
+        sd.detect = true;
+        if (sdInsertCheck) {
+            sdInsertCheck = false;
+        }
+    } else {
+        sd.detect = false;
+        sd.ready = false;
+    }
+
+    f_close(&sd.file);
+    sd_unmount();
     FATFS_UnLinkDriver(SDPath);
+    HAL_SD_DeInit(&hsd2);
     FATFS_LinkDriver(&SD_Driver, SDPath);
 }
 
@@ -775,6 +795,10 @@ void Controller::interruptPowerButtonRead() {
 
 void Controller::interruptSd() {
     if ((sd.detect) && (sd_detect() == SD_ERROR)) {
+        f_close(&sd.file);
+        sd_unmount();
+        FATFS_UnLinkDriver(SDPath);
+        HAL_SD_DeInit(&hsd2);
         sd.detect = false;
         sd.ready = false;
     }

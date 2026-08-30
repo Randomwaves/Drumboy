@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# KiCad
+*-backups/
+fp-info-cache
+_autosave-*
+*.kicad_sch-bak
+*.kicad_pcb-bak
+*.bck
+*.lck
+
+# STM32CubeIDE / Eclipse build output
+Debug/
+Release/
+build/
+
+# Claude Code
+.claude/

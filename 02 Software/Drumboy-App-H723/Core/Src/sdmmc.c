@@ -43,7 +43,11 @@ void MX_SDMMC2_SD_Init(void)
   hsd2.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd2.Init.BusWide = SDMMC_BUS_WIDE_4B;
   hsd2.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd2.Init.ClockDiv = 10;
+  hsd2.Init.ClockDiv = 32;
+  if (HAL_SD_Init(&hsd2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN SDMMC2_Init 2 */
 
   /* USER CODE END SDMMC2_Init 2 */
@@ -94,7 +98,7 @@ void HAL_SD_MspInit(SD_HandleTypeDef* sdHandle)
     HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
     /* SDMMC2 interrupt Init */
-    HAL_NVIC_SetPriority(SDMMC2_IRQn, 0, 2);
+    HAL_NVIC_SetPriority(SDMMC2_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(SDMMC2_IRQn);
   /* USER CODE BEGIN SDMMC2_MspInit 1 */
 
@@ -136,3 +140,4 @@ void HAL_SD_MspDeInit(SD_HandleTypeDef* sdHandle)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
+

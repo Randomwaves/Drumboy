@@ -16,14 +16,15 @@ extern "C" void PeriphCommonClock_Config();
 extern "C" void System_Initialize();
 extern "C" void Sdram_Initialize();
 
-uint8_t syncInData[2];
-uint8_t syncOutData[2];
-
 uint8_t midiRxData;
+
+uint32_t i2s_txBuffer[I2S_TOTAL_BUFFER_SIZE] = {0x00};
 
 Controller controller;
 
 int main() {
+    __set_FPSCR(__get_FPSCR() | (1U << 24) | (1U << 25));
+
     HAL_Init();
 
     SystemClock_Config();
@@ -134,11 +135,9 @@ extern "C" void System_Initialize() {
     MX_FATFS_Init();
     MX_I2C3_Init();
     MX_I2S3_Init();
-    MX_SDMMC2_SD_Init();
-    MX_UART4_Init();
-    MX_UART7_Init();
     MX_USART1_UART_Init();
     MX_USART6_UART_Init();
+    MX_TIM4_Init();
     MX_TIM5_Init();
     MX_TIM6_Init();
     MX_TIM7_Init();
@@ -237,19 +236,18 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     if (GPIO_Pin == CT2_D4_Pin) {
         (controller.getLayerTab() == TAB_0) ? controller.keyboard.layerButtonPress[0] = true : controller.keyboard.layerButtonPress[5] = true;
     }
-    // trigger sync in
-    /*
-    if (GPIO_Pin == SYNC_IN_Pin) {
-        if ((controller.getMenu() != INIT_MENU) && (controller.getSystem().syncIn))
-            HAL_UART_Receive_DMA(&huart7, syncInData, sizeof(syncInData));
+    if (GPIO_Pin == SYNC_IN_PULSE_Pin) {
+        controller.interruptSyncInPulse();
     }
-    */
     // trigger button
     if (GPIO_Pin == BUTTON_Pin) {
     }
 };
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+    if (htim->Instance == TIM4) {
+        controller.interruptSyncMidiClock();
+    }
     // effect transition timer
     if (htim->Instance == TIM5) {
         controller.interruptTransition();
@@ -298,38 +296,30 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
 void HAL_TIM_ErrorCallback(TIM_HandleTypeDef *htim) {}
 
+void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s) {
+    if (hi2s == &hi2s3) {
+        controller.processAudioBlock(&i2s_txBuffer[0]);
+    }
+}
+
 void HAL_I2S_TxCpltCallback(I2S_HandleTypeDef *hi2s) {
     if (hi2s == &hi2s3) {
-        controller.interruptAudioSend();
-        controller.interruptAudioMetronome();
-        controller.interruptAudioSong();
-        controller.interruptAudioLpf();
-        controller.interruptAudioEq();
-        controller.interruptAudioFilter();
-        controller.interruptAudioEffect();
-        controller.interruptAudioReverb();
+        controller.processAudioBlock(&i2s_txBuffer[I2S_BLOCK_SIZE * I2S_CHANNEL_COUNT]);
     }
 }
 
 void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s) {}
 
-void HAL_I2S_ErrorCallback(I2S_HandleTypeDef *hi2s) {}
+void HAL_I2S_ErrorCallback(I2S_HandleTypeDef *hi2s) {
+}
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart4) {
-    }
-
     if (huart == &huart6) {
-        controller.midiTxBusy = false;
+        controller.serviceMidiTx();
     }
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart7) {
-        controller.receiveSyncCommand();
-        HAL_UART_Receive_DMA(&huart7, syncInData, sizeof(syncInData));
-    }
-
     if (huart == &huart1) {
         controller.receiveMidiCommand();
         HAL_UART_Receive_DMA(&huart1, &midiRxData, 1);
@@ -337,10 +327,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart7) {
-        HAL_UART_Receive_DMA(&huart7, syncInData, sizeof(syncInData));
-    }
-
     if (huart == &huart1) {
         HAL_UART_Receive_DMA(&huart1, &midiRxData, 1);
     }

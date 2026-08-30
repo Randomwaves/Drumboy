@@ -12,17 +12,12 @@
 #include "stm32h7xx_hal.h"
 #include "string.h"
 
-extern "C" uint8_t syncInData[2];
-extern "C" uint8_t syncOutData[2];
-
 extern "C" uint8_t midiRxData;
-
-extern "C" UART_HandleTypeDef huart4; // sync-out
-extern "C" UART_HandleTypeDef huart7; // sync-in
 
 extern "C" UART_HandleTypeDef huart1; // midi-rx
 extern "C" UART_HandleTypeDef huart6; // midi-tx
 
+extern "C" TIM_HandleTypeDef htim4;  // midi clock timer
 extern "C" TIM_HandleTypeDef htim5;  // transition timer
 extern "C" TIM_HandleTypeDef htim6;  // left button timer
 extern "C" TIM_HandleTypeDef htim7;  // right button timer
@@ -35,12 +30,13 @@ extern "C" TIM_HandleTypeDef htim17; // sd check timer
 extern "C" TIM_HandleTypeDef htim23; // beat sync timer
 extern "C" TIM_HandleTypeDef htim24; // limit alert timer
 
+
 class Controller {
 private:
     Sys system;
     Rhythm rhythm;
     Metronome metronome;
-    Lpf lpf;
+    Lpf lpf[kLpfLibrarySize];
     Eq eq;
     Filter filter[kFilterLibrarySize];
     Effect effect[kEffectLibrarySize];
@@ -51,16 +47,23 @@ private:
     MetroPlayData mD;
     SongPlayData sD;
 
-    int32_t audioMetronome; // 32-bit
-    int32_t audioSong;      // 24-bit
-    int32_t audioLpf;       // 24-bit
-    int32_t audioEq;        // 24-bit
-    int32_t audioFilter;    // 24-bit
-    int32_t audioEffect;    // 24-bit
-    int32_t audioReverb_L;  // 32-bit
-    int32_t audioReverb_R;  // 32-bit
-    int32_t audioSend_L;    // 32-bit
-    int32_t audioSend_R;    // 32-bit
+    float audioMetronome;
+    float audioSong;
+    float audioLpf;
+    float audioEq;
+    float audioFilter;
+    float audioEffect;
+    float audioReverb_L;
+    float audioReverb_R;
+    float audioSend_L;
+    float audioSend_R;
+    float audioMetronomeBlock[I2S_BLOCK_SIZE];
+    float audioSongBlock[I2S_BLOCK_SIZE];
+    float audioEqBlock[I2S_BLOCK_SIZE];
+    float audioFilterBlock[I2S_BLOCK_SIZE];
+    float audioEffectBlock[I2S_BLOCK_SIZE];
+    float audioReverbLBlock[I2S_BLOCK_SIZE];
+    float audioReverbRBlock[I2S_BLOCK_SIZE];
 
     int8_t selectedLayerNum;
     int8_t selectedBeatNum;
@@ -115,9 +118,17 @@ private:
 
     bool playActive;
     bool recordActive;
+    bool syncInPlayArmed;
+    bool syncInRecordArmed;
 
     uint32_t playTimerPeriod;
     uint32_t measureTimerPeriod;
+    uint16_t midiClockTickAccumulator;
+    bool midiSyncStopRewindPending;
+    bool ignoreNextMidiStopAfterSpecialCmd;
+    uint16_t syncOutPulseTickAccumulator;
+    uint8_t systemSyncInPpqn;
+    uint8_t systemSyncOutPpqn;
 
     uint16_t playX;
     float playXRatio;
@@ -133,6 +144,7 @@ private:
     bool upButtonFlag;
     bool downButtonFlag;
     uint8_t upDownButtonCounter;
+    uint16_t upDownRepeatCount;
 
     bool layerBeatButtonFlag;
     bool layerClearButtonFlag;
@@ -159,6 +171,7 @@ private:
     bool limitAlertShowFlag;
     bool limitAlertClearFlag;
     bool limitAlertActive;
+    bool lastArmedAlertState;
 
     int8_t copyLayerInstNum;
     int8_t copyLayerFillNum;
@@ -178,6 +191,8 @@ private:
 
     bool sampleFadeOut;
 
+    uint8_t sdReadFailCount = 0;
+
 public:
     Controller();
     ~Controller();
@@ -190,8 +205,6 @@ public:
     Menu getMenu() { return menu; }
     Sys getSystem() { return system; }
 
-    bool midiTxBusy;
-
     bool getPower() { return power; }
 
     void initialize();
@@ -199,12 +212,16 @@ public:
     void systemReset();
     void systemUpdate_A();
     void systemUpdate_B();
+    bool enqueueMidiTx(const uint8_t *data, uint8_t len);
+    void startMidiTx();
+    void serviceMidiTx();
     bool sendMidiCommand(uint8_t command_, uint8_t data0_, uint8_t data1_);
     void receiveMidiCommand();
     bool sendSyncCommand(uint8_t data_);
-    void receiveSyncCommand();
     void calculateSongInterval();
     uint16_t calculateTriggerInterval();
+    bool hasJustCrossedTriggerBoundary();
+    void applyMidiSyncStopRewind();
     void adjustMeasureBarTiming();
     void updatePlayTimerPeriod();
 
@@ -223,9 +240,6 @@ public:
 
     LayerTab getLayerTab() const {
         return layerTab;
-    }
-    void setLeftButtonState(ButtonState state_) {
-        keyboard.leftButtonState = state_;
     }
     ButtonState getLeftButtonState() const {
         return keyboard.leftButtonState;
@@ -271,6 +285,12 @@ public:
     void stopLongButtonTimer() {
         HAL_TIM_Base_Stop_IT(&htim13);
         __HAL_TIM_SET_COUNTER(&htim13, 0);
+    }
+    void startMidiClockTimer() {
+        HAL_TIM_Base_Start_IT(&htim4);
+    }
+    void stopMidiClockTimer() {
+        HAL_TIM_Base_Stop_IT(&htim4);
     }
     void startPlayTimer() {
         HAL_TIM_Base_Start_IT(&htim14);
@@ -334,8 +354,6 @@ public:
     SdResult sd_loadImage(char *fileAddress, uint32_t paletteAddress, uint32_t dataAddress, uint16_t paletteSize, uint16_t width, uint16_t height, RGBMode mode);
     SdResult load16BitAudio(char *fileAddress, uint32_t ramAddress, uint32_t sampleSize);
     SdResult load24BitAudio(char *fileAddress, uint32_t ramAddress, uint32_t sampleSize);
-    SdResult sd_checkMetronome();
-    SdResult sd_loadMetronome();
     void sd_getLibraries();
     SdResult sd_getFileLibrary();
     SdResult sd_getDrumkitLibrary();
@@ -381,6 +399,7 @@ public:
     void lcd_clearAlert();
     // limit functions
     void lcd_drawLimitAlert();
+    void lcd_drawArmedAlert();
     // sd functions
     void lcd_drawSdDataIntro();
     void lcd_drawSdData();
@@ -431,7 +450,7 @@ public:
     void lcd_drawSystemMenu();
     void lcd_drawSystem_VolumeData();
     void lcd_drawSystem_PanData();
-    void lcd_drawSystem_LimiterData();
+    void lcd_drawSystem_NormalizeData();
     void lcd_drawSystem_MidiInData();
     void lcd_drawSystem_MidiOutData();
     void lcd_drawSystem_SyncInData();
@@ -576,11 +595,15 @@ public:
 
     void system_setVolume(uint8_t volume_);
     void system_setPan(uint8_t pan_);
-    void system_setLimiter(bool mode_);
+    void system_setNormalize(bool mode_);
     void system_setMidiIn(uint8_t mode_);
     void system_setMidiOut(uint8_t mode_);
+    void system_setMidiInChannel(uint8_t channel_);
+    void system_setMidiOutChannel(uint8_t channel_);
     void system_setSyncIn(uint8_t mode_);
     void system_setSyncOut(uint8_t mode_);
+    void system_setSyncInPpqn(uint8_t ppqnIdx_);
+    void system_setSyncOutPpqn(uint8_t ppqnIdx_);
 
     void system_volumeTransition(float volumeFloat_);
     void system_panTransition(float volumeLeftFloat_, float volumeRightFloat_);
@@ -639,7 +662,6 @@ public:
     void eq_setGainHighShelf(uint8_t gain_);
     void eq_setFreqPeak(uint8_t peakNum_, uint8_t freq_);
     void eq_setGainPeak(uint8_t peakNum_, uint8_t gain_);
-    void eq_setQPeak(uint8_t peakNum_, uint8_t q_);
 
     void eq_genTransition(EqTransitionMode mode_, bool activeActive_, bool targetActive_);
     void eq_calculateActiveTransition();
@@ -689,6 +711,7 @@ public:
     void effect_mixTransition(uint8_t effectNum_, float dryFloat_, float wetFloat_);
     void effect_calculateGenTransition(uint8_t effectNum_);
     void effect_calculateMixTransition(uint8_t effectNum_);
+    void effect_updateMixFloats(uint8_t effectNum_);
 
     void effect_cleanMemory(uint8_t effectNum_, uint8_t type_);
 
@@ -718,7 +741,7 @@ public:
     /* Layer functions -------------------------------------------------------*/
 
     void layer_setTab(LayerTab layerTab_);
-    void layer_playBeat(uint8_t layerNum_);
+    void layer_playBeat(uint8_t layerNum_, float fillVolMultiplier_ = 1.0f, bool record_ = true);
 
     /* Layer Inst functions --------------------------------------------------*/
 
@@ -755,6 +778,7 @@ public:
 
     void layerSong_setBeat(uint8_t layerNum_, uint8_t bankNum_, uint16_t interval_, uint8_t fill_);
     void layerSong_setBeatFill(uint8_t fill_);
+    void layerSong_shiftSelectedBeat(bool direction_);
     void layerSong_generateBeat(uint8_t type);
     void layerSong_resetSelectedBeat();
     void layerSong_resetBeats(uint8_t layerNum_, uint8_t bankNum_, uint16_t startInterval_);
@@ -772,7 +796,7 @@ public:
 
     /* Play functions --------------------------------------------------------*/
 
-    void record();
+    void record(bool bypassPrecount = false);
     void play();
     void stop();
     void reset();
@@ -780,21 +804,28 @@ public:
     void triggerStop();
     void triggerReset();
 
+    /* Audio Functions ------------------------------------------------------ */
+
+    void processAudioBlock(uint32_t *outputBuffer_);
+    
+    void processAudioMetronome();
+    void processAudioSong();
+    void processAudioEq();
+    void processAudioFilter();
+    void processAudioEffect();
+    void processAudioReverb();
+    void processAudioSend(uint32_t *outputBuffer_);
+
+    float processAudioFilterHelper(uint8_t filterNum_, float audio_);
+    float processAudioEffectHelper(uint8_t effectNum_, float audio_);
+    float processAudioLpfHelper(uint8_t lpfNum_, float audio_);
+
     /* Interrupt functions ---------------------------------------------------*/
 
+    void interruptSyncMidiClock();
     void interruptPlay();
-
-    void interruptAudioMetronome();
-    void interruptAudioSong();
-    void interruptAudioLpf();
-    void interruptAudioEq();
-    void interruptAudioFilter();
-    void interruptAudioEffect();
-    void interruptAudioReverb();
-    void interruptAudioSend();
-
-    int32_t processAudioFilter(uint8_t filterNum_, int32_t audio_);
-    int32_t processAudioEffect(uint8_t effectNum_, int32_t audio_);
+    void interruptSyncInPulse();
+    void interruptSyncInGate();
 
     void interruptTransition();
 
@@ -820,6 +851,7 @@ public:
         lcd.setBackColor(BLACK);
         lcd.drawNumber(num_, 8, 30, 30 + (line_ * 10));
     }
+
 };
 
 #endif

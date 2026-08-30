@@ -7,6 +7,8 @@
 #include "i2s.h"
 #include "main.h"
 
+extern uint32_t i2s_txBuffer[I2S_TOTAL_BUFFER_SIZE];
+
 class Dac {
    private:
     uint16_t readRegisterFull(uint16_t reg);

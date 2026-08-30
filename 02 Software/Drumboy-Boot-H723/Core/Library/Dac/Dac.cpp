@@ -82,7 +82,7 @@ void Dac::initialize() {
     writeRegisterFull(LINREG_CTRL_REG, 0x006C);
     writeRegisterFull(REF_CTRL_REG, 0x01F2);
     writeRegisterFull(LINE_OUT_CTRL_REG, 0x0F22);
-    writeRegisterFull(SHORT_CTRL_REG, 0x4446);
+    writeRegisterFull(SHORT_CTRL_REG, 0x4400);
     writeRegisterFull(ANA_CTRL_REG, 0x0137);
 
     // DAP Control
@@ -116,14 +116,6 @@ void Dac::initialize() {
 
     writeRegisterMask(DAP_CONTROL_REG, DAP_CONTROL_DAP_EN_MASK, DAP_CONTROL_DAP_EN_SHIFT, 0x01);
 
-    // AVC
-    // enableAVC();
-    // Surround
-    // enableSurround();
-    // setSurround(0x07);
-    // Bass Enhance
-    // disableBassEnhance();
-    // setBassEnhance(0x05, 0x1F);
     // DAC Volume
     writeRegisterMask(ADCDAC_CTRL_REG, ADCDAC_CTRL_DAC_MUTE_LEFT_MASK, ADCDAC_CTRL_DAC_MUTE_LEFT_SHIFT, 0x00);
     writeRegisterMask(ADCDAC_CTRL_REG, ADCDAC_CTRL_DAC_MUTE_RIGHT_MASK, ADCDAC_CTRL_DAC_MUTE_RIGHT_SHIFT, 0x00);

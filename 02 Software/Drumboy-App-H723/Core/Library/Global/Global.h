@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "Metronome.h"
 #include "fatfs.h"
 #include "main.h"
 #include "sdmmc.h"
@@ -14,7 +15,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 const uint8_t kVersionMajor = 0x01;
-const uint8_t kVersionMinor = 0x01;
+const uint8_t kVersionMinor = 0x05;
 
 ////////////////////////////////////////////////////////////////////////////////
 /* Global Functions ----------------------------------------------------------*/
@@ -24,6 +25,10 @@ const uint8_t kVersionMinor = 0x01;
 
 const int32_t INT24_MAX = 8388607;
 const int32_t INT24_MIN = -8388608;
+
+#define I2S_BLOCK_SIZE 32
+#define I2S_CHANNEL_COUNT 2
+#define I2S_TOTAL_BUFFER_SIZE (I2S_BLOCK_SIZE * I2S_CHANNEL_COUNT * 2)
 
 // (*STM32_UNIQUE_ID) == 2424897;
 // (*STM32_UNIQUE_ID) == 2424884;
@@ -56,7 +61,32 @@ inline float dBToAmplitude(float dB) {
     return pow(10.0f, dB / 20.0f);
 }
 
+inline float softKneeClip(float x) {
+    const float kThreshold = 0.6666666667f;
+    float absX = fabsf(x);
+    if (absX <= kThreshold) {
+        return x;
+    }
+
+    if (absX > 1.25f) {
+        return (x > 0.0f) ? 1.0f : -1.0f;
+    }
+
+    float saturated = (absX - kThreshold) / (1.25f - kThreshold);
+    float val = kThreshold + (1.25f - kThreshold) * (saturated - 0.3333333333f * saturated * saturated * saturated);
+    return (x > 0.0f) ? val : -val;
+}
+
 const int32_t kAudioSampleRate = 44100;
+const float kInvSampleRate = 1.0f / (float)kAudioSampleRate;
+
+static inline float sinFast(float phaseNorm) {
+    return sinf(2.0f * (float)M_PI * phaseNorm);
+}
+
+static inline float cosFast(float phaseNorm) {
+    return cosf(2.0f * (float)M_PI * phaseNorm);
+}
 
 typedef enum {
     FILE_NONE = 0x00,
@@ -69,16 +99,41 @@ typedef enum {
 #define LED0_ON HAL_GPIO_WritePin(LED0_GPIO_Port, LED0_Pin, GPIO_PIN_SET)
 #define LED1_ON HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET)
 #define LED2_ON HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_SET)
-#define SYNC_OUT_ON HAL_GPIO_WritePin(SYNC_OUT_GPIO_Port, SYNC_OUT_Pin, GPIO_PIN_SET)
+#define SYNC_OUT_ON HAL_GPIO_WritePin(SYNC_OUT_PULSE_GPIO_Port, SYNC_OUT_PULSE_Pin, GPIO_PIN_SET)
+
 
 #define LED0_OFF HAL_GPIO_WritePin(LED0_GPIO_Port, LED0_Pin, GPIO_PIN_RESET)
 #define LED1_OFF HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_RESET)
 #define LED2_OFF HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_RESET)
-#define SYNC_OUT_OFF HAL_GPIO_WritePin(SYNC_OUT_GPIO_Port, SYNC_OUT_Pin, GPIO_PIN_RESET)
+#define SYNC_OUT_OFF HAL_GPIO_WritePin(SYNC_OUT_PULSE_GPIO_Port, SYNC_OUT_PULSE_Pin, GPIO_PIN_RESET)
+
 
 #define LED0_TOGGLE HAL_GPIO_TogglePin(LED0_GPIO_Port, LED0_Pin)
 #define LED1_TOGGLE HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin)
 #define LED2_TOGGLE HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin)
+
+////////////////////////////////////////////////////////////////////////////////
+/* Delay_us Function ---------------------------------------------------------*/
+////////////////////////////////////////////////////////////////////////////////
+
+#define DWT_CTRL (*(volatile uint32_t*)0xE0001000)
+#define DWT_CYCCNT (*(volatile uint32_t*)0xE0001004)
+#define DWT_LAR (*(volatile uint32_t*)0xE0001FB0)
+#define DEMCR (*(volatile uint32_t*)0xE000EDFC)
+#define TRCENA (1 << 24)
+#define CYCCNTENA (1 << 0)
+#define DWT_LAR_UNLOCK (0xC5ACCE55)
+
+static void dwt_initialize() {
+    DEMCR |= TRCENA;
+    DWT_LAR = DWT_LAR_UNLOCK;
+    DWT_CYCCNT = 0;
+    DWT_CTRL |= CYCCNTENA;
+}
+
+static inline uint32_t dwt_getMicros() {
+    return DWT_CYCCNT / (SystemCoreClock / 1000000);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 /* Ram Addresses -------------------------------------------------------------*/
@@ -187,33 +242,17 @@ const uint32_t kChorusByteSize = kChorusSize * 4;
 #define RAM_CHORUS_0 RAM_CHORUS_ADDRESS
 #define RAM_CHORUS_1 RAM_CHORUS_ADDRESS + (1 * kChorusByteSize)
 
-#define RAM_METRO_ADDRESS 0xC0EA6000
+const uint32_t kMetronomeSampleSize = sizeof(kMetronomeDataLibrary[0][0]) / sizeof(kMetronomeDataLibrary[0][0][0]);
+const uint32_t kMetroSize = kMetronomeSampleSize;
 
-const uint32_t kMetroSize = 9600; // 0.2 seconds
-const uint32_t kMetroByteSize = kMetroSize * 3;
+#define RAM_INST_LIBRARY_ADDRESS 0xC0EA6000
+#define RAM_SAMPLE_LIBRARY_ADDRESS 0xC0EB0000
 
-#define RAM_METRO_0A RAM_METRO_ADDRESS
-#define RAM_METRO_0B RAM_METRO_ADDRESS + (1 * kMetroByteSize)
-#define RAM_METRO_1A RAM_METRO_ADDRESS + (2 * kMetroByteSize)
-#define RAM_METRO_1B RAM_METRO_ADDRESS + (3 * kMetroByteSize)
-#define RAM_METRO_2A RAM_METRO_ADDRESS + (4 * kMetroByteSize)
-#define RAM_METRO_2B RAM_METRO_ADDRESS + (5 * kMetroByteSize)
-#define RAM_METRO_3A RAM_METRO_ADDRESS + (6 * kMetroByteSize)
-#define RAM_METRO_3B RAM_METRO_ADDRESS + (7 * kMetroByteSize)
-#define RAM_METRO_4A RAM_METRO_ADDRESS + (8 * kMetroByteSize)
-#define RAM_METRO_4B RAM_METRO_ADDRESS + (9 * kMetroByteSize)
+// 0xC0EDBF20 - 0xC0FB9640  free space
 
-const uint32_t kRamMetronomeAddressLibrary[5][2] = {
-    {RAM_METRO_0A, RAM_METRO_0B},
-    {RAM_METRO_1A, RAM_METRO_1B},
-    {RAM_METRO_2A, RAM_METRO_2B},
-    {RAM_METRO_3A, RAM_METRO_3B},
-    {RAM_METRO_4A, RAM_METRO_4B},
-};
-
-#define RAM_IMAGE_LOGO_ADDRESS 0xC0FB9640            // 600px * 100px
+#define RAM_IMAGE_LOGO_ADDRESS 0xC0FB9640            // 170px * 170px
 #define RAM_IMAGE_LOGO_PALETTE_ADDRESS 0xC0FB9640    //    128 bytes
-#define RAM_IMAGE_LOGO_DATA_ADDRESS 0xC0FB9640 + 128 // 60.000 bytes
+#define RAM_IMAGE_LOGO_DATA_ADDRESS 0xC0FB9640 + 128 // 28.900 bytes
 
 #define RAM_IMAGE_MENU_ADDRESS 0xC0FC8120            // 814px * 107px
 #define RAM_IMAGE_MENU_PALETTE_ADDRESS 0xC0FC8120    //    128 bytes
@@ -449,10 +488,10 @@ const uint16_t kPlayY = 113;
 const RGB16Color kPlayColor0 = BLACK;
 const RGB16Color kPlayColor1 = WHITE;
 
-const uint16_t kImageLogoWidth = 450;
-const uint16_t kImageLogoHeight = 80;
-const uint16_t kImageLogoX = 202;
-const uint16_t kImageLogoY = 200;
+const uint16_t kImageLogoWidth = 170;
+const uint16_t kImageLogoHeight = 170;
+const uint16_t kImageLogoX = 342;
+const uint16_t kImageLogoY = 155;
 const uint16_t kImageLogoPalette = 64;
 
 const uint16_t kImageMenuWidth = 814;
@@ -590,7 +629,7 @@ const char kHeaderFilterA[] = "FILTER 1  ";
 const char kHeaderFilterB[] = "FILTER 2  ";
 const char kHeaderFrequency[] = "FREQ      ";
 const char kHeaderInst[] = "INST      ";
-const char kHeaderLimiter[] = "LIMITER   ";
+const char kHeaderNormalize[] = "NORMALIZE ";
 const char kHeaderLoad[] = "LOAD      ";
 const char kHeaderMeasure[] = "MEASURE   ";
 const char kHeaderMetronome[] = "METRONOME ";
@@ -663,12 +702,19 @@ struct Keyboard {
     int16_t rightButtonTemp = 0;
     int16_t leftButton = -1;
     int16_t rightButton = -1;
+    uint8_t leftButtonActiveCount = 0;
+    uint8_t rightButtonActiveCount = 0;
+    int16_t leftButtonConfirmTemp = 0;
+    int16_t rightButtonConfirmTemp = 0;
+    uint8_t leftButtonConfirmActiveCount = 0;
+    uint8_t rightButtonConfirmActiveCount = 0;
     bool leftButtonPress = false;
     bool rightButtonPress = false;
     bool layerButtonPress[10];
     bool muteButtonPress = false;
     bool fillButtonPress = false;
     bool styleButtonPress = false;
+    bool shiftButtonPress = false;
     bool instButtonPress = false;
     bool songButtonPress = false;
     bool bankButtonPress = false;
@@ -676,6 +722,8 @@ struct Keyboard {
 
 const uint8_t kLongButtonCountLow = 5;
 const uint8_t kLongButtonCountHigh = 10;
+
+const uint16_t kMaxUpDownRepeatCount = 45;
 
 #define CT0_SCL_HIGH CT0_SCL_GPIO_Port->BSRR = CT0_SCL_Pin
 #define CT0_SCL_LOW CT0_SCL_GPIO_Port->BSRR = CT0_SCL_Pin << 16U
@@ -967,24 +1015,34 @@ const uint8_t kMinSystemPan = 0;
 const uint8_t kMaxSystemPan = 20;
 
 const uint8_t kMinSystemMidiIn = 0;
-const uint8_t kMaxSystemMidiIn = 16;
+const uint8_t kMaxSystemMidiIn = 3;
 
 const uint8_t kMinSystemMidiOut = 0;
-const uint8_t kMaxSystemMidiOut = 16;
+const uint8_t kMaxSystemMidiOut = 3;
+
+const uint8_t kMinSystemMidiChannel = 0;
+const uint8_t kMaxSystemMidiChannel = 15;
 
 const uint8_t kMinSystemSyncIn = 0;
-const uint8_t kMaxSystemSyncIn = 1;
+const uint8_t kMaxSystemSyncIn = 2;
 
 const uint8_t kMinSystemSyncOut = 0;
-const uint8_t kMaxSystemSyncOut = 2;
+const uint8_t kMaxSystemSyncOut = 3;
+
+const uint8_t kMinSystemSyncPpqn = 0;
+const uint8_t kMaxSystemSyncPpqn = 5;
 
 const uint8_t kInitialSystemVolume = 15;
 const uint8_t kInitialSystemPan = 10;
-const uint8_t kInitialSystemLimiter = true;
+const uint8_t kInitialSystemNormalize = true;
 const uint8_t kInitialSystemMidiIn = 0;
 const uint8_t kInitialSystemMidiOut = 0;
+const uint8_t kInitialSystemMidiInChannel = 0;
+const uint8_t kInitialSystemMidiOutChannel = 0;
 const uint8_t kInitialSystemSyncIn = 0;
 const uint8_t kInitialSystemSyncOut = 0;
+const uint8_t kInitialSystemSyncInPpqn = 1;
+const uint8_t kInitialSystemSyncOutPpqn = 1;
 
 struct SystemVolumeData {
     char nameLongR[11];
@@ -992,7 +1050,7 @@ struct SystemVolumeData {
 };
 
 const struct SystemVolumeData kSystemVolumeDataLibrary[] = {
-    {"        00", 0.0000}, {"        05", 0.0025}, {"        10", 0.0100}, {"        15", 0.0225}, {"        20", 0.0400}, {"        25", 0.0625}, {"        30", 0.0900}, {"        35", 0.1225}, {"        40", 0.1600}, {"        45", 0.2025}, {"        50", 0.2500}, {"        55", 0.3025}, {"        60", 0.3600}, {"        65", 0.4225}, {"        70", 0.4900}, {"        75", 0.5625}, {"        80", 0.6400}, {"        85", 0.7225}, {"        90", 0.8100}, {"        95", 0.9025}, {"       100", 1.00}};
+    {"        00", 0.000000}, {"        05", 0.000125}, {"        10", 0.001000}, {"        15", 0.003375}, {"        20", 0.008000}, {"        25", 0.015625}, {"        30", 0.027000}, {"        35", 0.042875}, {"        40", 0.064000}, {"        45", 0.091125}, {"        50", 0.125000}, {"        55", 0.166375}, {"        60", 0.216000}, {"        65", 0.274625}, {"        70", 0.343000}, {"        75", 0.421875}, {"        80", 0.512000}, {"        85", 0.614125}, {"        90", 0.729000}, {"        95", 0.857375}, {"       100", 1.000000}};
 
 struct SystemPanData {
     char nameShortR[5];
@@ -1005,12 +1063,20 @@ const struct SystemPanData kSystemPanDataLibrary[] = {
 
 struct SystemMidiData {
     char nameShortR[5];
-    bool active;
-    uint8_t channel;
+    bool syncEnabled;
+    bool notesEnabled;
 };
 
 const struct SystemMidiData kSystemMidiDataLibrary[]{
-    {" OFF", false, 0}, {"  01", true, 0}, {"  02", true, 1}, {"  03", true, 2}, {"  04", true, 3}, {"  05", true, 4}, {"  06", true, 5}, {"  07", true, 6}, {"  08", true, 7}, {"  09", true, 8}, {"  10", true, 9}, {"  11", true, 10}, {"  12", true, 11}, {"  13", true, 12}, {"  14", true, 13}, {"  15", true, 14}, {"  16", true, 15}};
+    {" OFF", false, false}, {"NOTE", false, true}, {"SYNC", true, false}, {" S+N", true, true}};
+
+struct SystemSyncPpqnData {
+    char nameShortR[5];
+    uint8_t ppqn;
+};
+
+const struct SystemSyncPpqnData kSystemSyncPpqnDataLibrary[] = {
+    {"  01", 1}, {"  02", 2}, {"  04", 4}, {"  08", 8}, {"  12", 12}, {"  24", 24}};
 
 struct SystemSyncInData {
     char nameShortR[5];
@@ -1020,7 +1086,7 @@ struct SystemSyncInData {
 };
 
 const struct SystemSyncInData kSystemSyncInDataLibrary[] = {
-    {" OFF", false, false, false}, {"  RW", true, true, false}};
+    {" OFF", false, false, false}, {" M-A", true, true, true}, {" M-B", true, true, true}};
 
 struct SystemSyncOutData {
     char nameShortR[5];
@@ -1030,7 +1096,7 @@ struct SystemSyncOutData {
 };
 
 const struct SystemSyncOutData kSystemSyncOutDataLibrary[] = {
-    {" OFF", false, false, false}, {"  RW", true, true, false}, {" STD", false, false, true}};
+    {" OFF", false, false, false}, {" M-A", false, false, true}, {" M-B", false, true, true}, {" M-C", false, false, true}};
 
 typedef enum {
     SYNC_TEMPO = 0x00,
@@ -1065,9 +1131,28 @@ struct SystemPanTransition {
     SystemTransitionAction actionVolumeRight;
 };
 
+const uint8_t kMidiSysExStart = 0xF0;
+const uint8_t kMidiSysExEnd = 0xF7;
+const uint8_t kMidiSysExManufacturerNonCommercial = 0x7D;
+const uint8_t kMidiSysExTransportFamily = 0x52;
+const uint8_t kMidiSysExTrigStop = 0x11;
+const uint8_t kMidiSysExTrigReset = 0x12;
+const uint8_t kMidiSysExTrigRecord = 0x13;
+
+/*----------------------------------------------------------------------------*/
+
+struct MidiTxMsg {
+    uint8_t data[8];
+    uint8_t len;
+};
+
 struct Midi {
     bool rxActive = false;
     bool txActive = false;
+    bool rxSync = false;
+    bool rxNotes = false;
+    bool txSync = false;
+    bool txNotes = false;
 
     uint8_t rxChannel = 0;
     uint8_t txChannel = 0;
@@ -1086,6 +1171,29 @@ struct Midi {
     bool txTriggerNoteOff[10] = {false};
 
     const uint8_t txData[10] = {0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D};
+
+    volatile bool rxPlayFlag = false;
+    volatile bool rxContinueFlag = false;
+    volatile bool rxStopFlag = false;
+    volatile bool rxResetFlag = false;
+    volatile bool rxTrigStopFlag = false;
+    volatile bool rxTrigResetFlag = false;
+    volatile bool rxTrigRecordFlag = false;
+
+    uint8_t rxSysExStage = 0;
+    uint8_t rxSysExCmd = 0;
+
+    uint8_t rxClockCount = 0;
+    volatile uint32_t rxClockBeatStart = 0;
+    volatile uint16_t rxClockBpm = 0;
+    volatile bool rxClockFlag = false;
+    bool rxClockRunning = false;    // true while master clock is actively running
+
+    static constexpr uint8_t kTxRingSize = 32;
+    MidiTxMsg txRing[kTxRingSize] = {};
+    volatile uint8_t txRingHead = 0;
+    volatile uint8_t txRingTail = 0;
+    volatile bool txBusy = false;
 };
 
 struct Sync {
@@ -1099,12 +1207,24 @@ struct Sync {
 
     bool slaveMode = false;
     bool masterMode = false;
+
+    volatile uint32_t rxPulseLastTick = 0;
+    volatile uint32_t rxPulseInterval = 0;
+    volatile uint32_t rxPulseBeatStart = 0;     // start of 2-beat measurement window
+    volatile uint8_t rxPulseCount = 0;          // pulse count within measurement window
+    volatile uint16_t rxPulseBpm = 0;
+    volatile bool rxPulseFlag = false;
+    volatile bool rxPlayFlag = false;
+    volatile bool rxRecordFlag = false;
+    volatile bool rxStopFlag = false;
+    volatile bool rxResetFlag = false;
+    volatile bool rxGateHigh = false;
 };
 
 struct Sys {
     uint8_t volume = kInitialSystemVolume;
     uint8_t pan = kInitialSystemPan;
-    bool limiter = kInitialSystemLimiter;
+    bool normalize = kInitialSystemNormalize;
     uint8_t midiIn = kInitialSystemMidiIn;
     uint8_t midiOut = kInitialSystemMidiOut;
     uint8_t syncIn = kInitialSystemSyncIn;
@@ -1125,8 +1245,8 @@ struct Sys {
 /* Rhythm Constants ----------------------------------------------------------*/
 ////////////////////////////////////////////////////////////////////////////////
 
-const uint8_t kMinTempo = 60;
-const uint8_t kMaxTempo = 160;
+const uint8_t kMinTempo = 40;
+const uint8_t kMaxTempo = 200;
 
 const uint8_t kMinMeasure = 1;
 const uint8_t kMaxMeasure = 8;
@@ -1182,6 +1302,22 @@ struct Rhythm {
     bool quantizeLock = true;
 };
 
+/*----------------------------------------------------------------------------*/
+
+static inline bool hasReachedTransportInterval(uint16_t previousInterval_, uint16_t currentInterval_, uint16_t targetInterval_) {
+    if (previousInterval_ <= currentInterval_) {
+        return (targetInterval_ >= previousInterval_) && (targetInterval_ <= currentInterval_);
+    }
+
+    return (targetInterval_ >= previousInterval_) || (targetInterval_ <= currentInterval_);
+}
+
+static inline bool isWithinLateBarStopWindow(uint16_t playInterval_, uint16_t barInterval_, uint16_t windowFrames_) {
+    if ((barInterval_ == 0) || (windowFrames_ == 0)) return false;
+    const uint16_t offsetFromBar = playInterval_ % barInterval_;
+    return (offsetFromBar > 0) && (offsetFromBar <= windowFrames_);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 /* Metronome Constants -------------------------------------------------------*/
 ////////////////////////////////////////////////////////////////////////////////
@@ -1214,7 +1350,7 @@ struct MetronomeVolumeData {
 };
 
 const struct MetronomeVolumeData kMetronomeVolumeDataLibrary[] = {
-    {"       000", 0.0000}, {"       005", 0.0025}, {"       010", 0.0100}, {"       015", 0.0225}, {"       020", 0.0400}, {"       025", 0.0625}, {"       030", 0.0900}, {"       035", 0.1225}, {"       040", 0.1600}, {"       045", 0.2025}, {"       050", 0.2500}, {"       055", 0.3025}, {"       060", 0.3600}, {"       065", 0.4225}, {"       070", 0.4900}, {"       075", 0.5625}, {"       080", 0.6400}, {"       085", 0.7225}, {"       090", 0.8100}, {"       095", 0.9025}, {"       100", 1.00}};
+    {"       000", 0.000000}, {"       005", 0.000125}, {"       010", 0.001000}, {"       015", 0.003375}, {"       020", 0.008000}, {"       025", 0.015625}, {"       030", 0.027000}, {"       035", 0.042875}, {"       040", 0.064000}, {"       045", 0.091125}, {"       050", 0.125000}, {"       055", 0.166375}, {"       060", 0.216000}, {"       065", 0.274625}, {"       070", 0.343000}, {"       075", 0.421875}, {"       080", 0.512000}, {"       085", 0.614125}, {"       090", 0.729000}, {"       095", 0.857375}, {"       100", 1.000000}};
 
 typedef enum {
     MET_ACTION_NONE = 0x00,
@@ -1251,17 +1387,16 @@ struct Metronome {
 /* Lpf Constants -------------------------------------------------------------*/
 ////////////////////////////////////////////////////////////////////////////////
 
-const bool kInitialLpfActive = true;
-const uint16_t kInitialLpfFreq = 5000;
-const float kInitialLpfDry = 0.75;
-const float kInitialLpfWet = 0.25;
+const uint8_t kLpfLibrarySize = 2;
+
+#define FILTER_ANTI_DENORMAL 1.0e-18f
 
 struct Lpf {
-    bool active = kInitialLpfActive;
-    uint8_t freq = kInitialLpfFreq;
+    bool active;
+    uint16_t freq;
 
-    float dry = kInitialLpfDry;
-    float wet = kInitialLpfWet;
+    float dry;
+    float wet;
 
     float a0;
     float a1;
@@ -1269,24 +1404,34 @@ struct Lpf {
     float b1;
     float b2;
 
-    int32_t dataIn[3] = {0};
-    int32_t dataOut[3] = {0};
+    float dataIn[3] = {0.0f};
+    float dataOut[3] = {0.0f};
 
-    void initialize() {
+    void initialize(bool active_, uint16_t freq_, float dry_, float wet_) {
+        active = active_;
+        freq = freq_;
+        dry = dry_;
+        wet = wet_;
+
+        memset(dataIn, 0, sizeof(dataIn));
+        memset(dataOut, 0, sizeof(dataOut));
+
         calculateFilterCoef();
     }
 
     void calculateFilterCoef() {
-        float Q = 0.707;
-        float norm;
-        float K = tan(M_PI * freq / kAudioSampleRate);
+        float Q = 0.707f;
+        float normFreq = (float)freq * kInvSampleRate;
+        float sinOmega = sinFast(normFreq);
+        float cosOmega = cosFast(normFreq);
+        float alpha = sinOmega / (2.0f * Q);
+        float norm = 1.0f / (1.0f + alpha);
 
-        norm = 1.0f / (1.0f + K / Q + K * K);
-        a0 = K * K * norm;
-        a1 = 2.0f * a0;
-        a2 = a0;
-        b1 = 2.0f * (K * K - 1.0f) * norm;
-        b2 = (1.0f - K / Q + K * K) * norm;
+        a0 = ((1.0f - cosOmega) * 0.5f) * norm;
+        a1 = (1.0f - cosOmega) * norm;
+        a2 = ((1.0f - cosOmega) * 0.5f) * norm;
+        b1 = (-2.0f * cosOmega) * norm;
+        b2 = (1.0f - alpha) * norm;
     }
 };
 
@@ -1313,9 +1458,11 @@ const uint8_t kInitialEqGainLowShelf = 28;
 const uint8_t kInitialEqFreqHighShelf = 31;
 const uint8_t kInitialEqGainHighShelf = 20;
 
-const uint8_t kInitialEqQPeak[4] = {0, 0, 0, 0};
+const uint8_t kInitialEqQ = 0;
 const uint8_t kInitialEqFreqPeak[4] = {9, 12, 27, 29};
 const uint8_t kInitialEqGainPeak[4] = {26, 24, 24, 22};
+
+#define EQ_ANTI_DENORMAL 1.0e-18f
 
 typedef enum {
     EQ_LOWPASS = 0x00,
@@ -1352,14 +1499,16 @@ const struct EqGainData kEqGainDataLibrary[] = {
     {" -24", -24}, {" -23", -23}, {" -22", -22}, {" -21", -21}, {" -20", -20}, {" -19", -19}, {" -18", -18}, {" -17", -17}, {" -16", -16}, {" -15", -15}, {" -14", -14}, {" -13", -13}, {" -12", -12}, {" -11", -11}, {" -10", -10}, {" -09", -9}, {" -08", -8}, {" -07", -7}, {" -06", -6}, {" -05", -5}, {" -04", -4}, {" -03", -3}, {" -02", -2}, {" -01", -1}, {" +00", 0}, {" +01", 1}, {" +02", 2}, {" +03", 3}, {" +04", 4}, {" +05", 5}, {" +06", 6}, {" +07", 7}, {" +08", 8}, {" +09", 9}, {" +10", 10}, {" +11", 11}, {" +12", 12}};
 
 struct EqFilter {
-    float a0 = 0;
-    float a1 = 0;
-    float a2 = 0;
-    float b1 = 0;
-    float b2 = 0;
+    float b0 = 1.0f;
+    float b1 = 0.0f;
+    float b2 = 0.0f;
+    float a1 = 0.0f;
+    float a2 = 0.0f;
 
-    int32_t dataIn[3] = {0};
-    int32_t dataOut[3] = {0};
+    float x1 = 0.0f;
+    float x2 = 0.0f;
+    float y1 = 0.0f;
+    float y2 = 0.0f;
 };
 
 typedef enum {
@@ -1410,7 +1559,7 @@ struct Eq {
     uint8_t gainHighShelf;
     EqFilter filterHighShelf;
 
-    uint8_t qPeak[4] = {kInitialEqQPeak[0], kInitialEqQPeak[1], kInitialEqQPeak[2], kInitialEqQPeak[3]};
+    uint8_t q = kInitialEqQ;
     uint8_t freqPeak[4] = {kInitialEqFreqPeak[0], kInitialEqFreqPeak[1], kInitialEqFreqPeak[2], kInitialEqFreqPeak[3]};
     uint8_t gainPeak[4] = {kInitialEqGainPeak[0], kInitialEqGainPeak[1], kInitialEqGainPeak[2], kInitialEqGainPeak[3]};
 
@@ -1434,156 +1583,135 @@ struct Eq {
     }
 
     void calculateCoefLowShelf() {
-        calculateCoef(EQ_LOWSHELF, kAudioSampleRate, kEqFreqDataLibrary[freqLowShelf].data, 0.707, kEqGainDataLibrary[gainLowShelf].data, filterLowShelf);
+        calculateCoef(EQ_LOWSHELF, kEqFreqDataLibrary[freqLowShelf].data, 0.707f, (float)kEqGainDataLibrary[gainLowShelf].data, filterLowShelf);
     }
 
     void calculateCoefHighShelf() {
-        calculateCoef(EQ_HIGHSHELF, kAudioSampleRate, kEqFreqDataLibrary[freqHighShelf].data, 0.707, kEqGainDataLibrary[gainHighShelf].data, filterHighShelf);
+        calculateCoef(EQ_HIGHSHELF, kEqFreqDataLibrary[freqHighShelf].data, 0.707f, (float)kEqGainDataLibrary[gainHighShelf].data, filterHighShelf);
     }
 
     void calculateCoefPeak(uint8_t peakNum) {
-        calculateCoef(EQ_PEAK, kAudioSampleRate, kEqFreqDataLibrary[freqPeak[peakNum]].data, kEqQDataLibrary[qPeak[peakNum]].data, kEqGainDataLibrary[gainPeak[peakNum]].data, filterPeak[peakNum]);
+        calculateCoef(EQ_PEAK, kEqFreqDataLibrary[freqPeak[peakNum]].data, kEqQDataLibrary[q].data, (float)kEqGainDataLibrary[gainPeak[peakNum]].data, filterPeak[peakNum]);
     }
 
-    void calculateCoef(uint8_t type, uint32_t sampleRate, uint32_t freq, float Q, float gain, EqFilter &filter) {
-        float a0, a1, a2, b1, b2, norm;
+    void calculateCoef(uint8_t type, uint32_t freq, float Q, float gaindB, EqFilter& filter) {
+        float A = powf(10.0f, gaindB * 0.025f);
+        float normFreq = (float)freq * kInvSampleRate;
+        float cosw0 = cosFast(normFreq);
+        float sinw0 = sinFast(normFreq);
+        float alpha = sinw0 / (2.0f * Q);
 
-        float PI = 3.141592653f;
-        float SQ = 1.414213562f;
-        float V = pow(10, fabs(gain) / 20.0);
-        float K = tan(PI * freq / sampleRate);
+        float b0_tmp, b1_tmp, b2_tmp, a0_tmp, a1_tmp, a2_tmp;
 
         switch (type) {
-        case EQ_LOWPASS:
-            norm = 1.0f / (1.0f + K / Q + K * K);
-            a0 = K * K * norm;
-            a1 = 2.0f * a0;
-            a2 = a0;
-            b1 = 2.0f * (K * K - 1.0f) * norm;
-            b2 = (1.0f - K / Q + K * K) * norm;
-            break;
+            case EQ_LOWPASS:
+                b0_tmp = (1.0f - cosw0) * 0.5f;
+                b1_tmp = 1.0f - cosw0;
+                b2_tmp = (1.0f - cosw0) * 0.5f;
+                a0_tmp = 1.0f + alpha;
+                a1_tmp = -2.0f * cosw0;
+                a2_tmp = 1.0f - alpha;
+                break;
 
-        case EQ_HIGHPASS:
-            norm = 1 / (1 + K / Q + K * K);
-            a0 = 1 * norm;
-            a1 = -2 * a0;
-            a2 = a0;
-            b1 = 2 * (K * K - 1) * norm;
-            b2 = (1 - K / Q + K * K) * norm;
-            break;
+            case EQ_HIGHPASS:
+                b0_tmp = (1.0f + cosw0) * 0.5f;
+                b1_tmp = -(1.0f + cosw0);
+                b2_tmp = (1.0f + cosw0) * 0.5f;
+                a0_tmp = 1.0f + alpha;
+                a1_tmp = -2.0f * cosw0;
+                a2_tmp = 1.0f - alpha;
+                break;
 
-        case EQ_BANDPASS:
-            norm = 1 / (1 + K / Q + K * K);
-            a0 = K / Q * norm;
-            a1 = 0;
-            a2 = -a0;
-            b1 = 2 * (K * K - 1) * norm;
-            b2 = (1 - K / Q + K * K) * norm;
-            break;
+            case EQ_PEAK:
+                b0_tmp = 1.0f + (alpha * A);
+                b1_tmp = -2.0f * cosw0;
+                b2_tmp = 1.0f - (alpha * A);
+                a0_tmp = 1.0f + (alpha / A);
+                a1_tmp = -2.0f * cosw0;
+                a2_tmp = 1.0f - (alpha / A);
+                break;
 
-        case EQ_NOTCH:
-            norm = 1 / (1 + K / Q + K * K);
-            a0 = (1 + K * K) * norm;
-            a1 = 2 * (K * K - 1) * norm;
-            a2 = a0;
-            b1 = a1;
-            b2 = (1 - K / Q + K * K) * norm;
-            break;
+            case EQ_LOWSHELF: {
+                float sqrtA = sqrtf(A);
+                float Ap1 = A + 1.0f;
+                float Am1 = A - 1.0f;
+                float beta = 2.0f * sqrtA * alpha;
 
-        case EQ_PEAK:
-            if (gain >= 0) { // boost
-                norm = 1 / (1 + 1 / Q * K + K * K);
-                a0 = (1 + V / Q * K + K * K) * norm;
-                a1 = 2 * (K * K - 1) * norm;
-                a2 = (1 - V / Q * K + K * K) * norm;
-                b1 = a1;
-                b2 = (1 - 1 / Q * K + K * K) * norm;
-            } else { // cut
-                norm = 1 / (1 + V / Q * K + K * K);
-                a0 = (1 + 1 / Q * K + K * K) * norm;
-                a1 = 2 * (K * K - 1) * norm;
-                a2 = (1 - 1 / Q * K + K * K) * norm;
-                b1 = a1;
-                b2 = (1 - V / Q * K + K * K) * norm;
+                b0_tmp = A * ((Ap1) - (Am1) * cosw0 + beta);
+                b1_tmp = 2.0f * A * ((Am1) - (Ap1) * cosw0);
+                b2_tmp = A * ((Ap1) - (Am1) * cosw0 - beta);
+                a0_tmp = (Ap1) + (Am1) * cosw0 + beta;
+                a1_tmp = -2.0f * ((Am1) + (Ap1) * cosw0);
+                a2_tmp = (Ap1) + (Am1) * cosw0 - beta;
+                break;
             }
-            break;
 
-        case EQ_LOWSHELF:
-            if (gain >= 0) { // boost
-                norm = 1 / (1 + SQ * K + K * K);
-                a0 = (1 + sqrt(2 * V) * K + V * K * K) * norm;
-                a1 = 2 * (V * K * K - 1) * norm;
-                a2 = (1 - sqrt(2 * V) * K + V * K * K) * norm;
-                b1 = 2 * (K * K - 1) * norm;
-                b2 = (1 - SQ * K + K * K) * norm;
-            } else { // cut
-                norm = 1 / (1 + sqrt(2 * V) * K + V * K * K);
-                a0 = (1 + SQ * K + K * K) * norm;
-                a1 = 2 * (K * K - 1) * norm;
-                a2 = (1 - SQ * K + K * K) * norm;
-                b1 = 2 * (V * K * K - 1) * norm;
-                b2 = (1 - sqrt(2 * V) * K + V * K * K) * norm;
+            case EQ_HIGHSHELF: {
+                float sqrtA = sqrtf(A);
+                float Ap1 = A + 1.0f;
+                float Am1 = A - 1.0f;
+                float beta = 2.0f * sqrtA * alpha;
+
+                b0_tmp = A * ((Ap1) + (Am1) * cosw0 + beta);
+                b1_tmp = -2.0f * A * ((Am1) + (Ap1) * cosw0);
+                b2_tmp = A * ((Ap1) + (Am1) * cosw0 - beta);
+                a0_tmp = (Ap1) - (Am1) * cosw0 + beta;
+                a1_tmp = 2.0f * ((Am1) - (Ap1) * cosw0);
+                a2_tmp = (Ap1) - (Am1) * cosw0 - beta;
+                break;
             }
-            break;
 
-        case EQ_HIGHSHELF:
-            if (gain >= 0) { // boost
-                norm = 1 / (1 + SQ * K + K * K);
-                a0 = (V + sqrt(2 * V) * K + K * K) * norm;
-                a1 = 2 * (K * K - V) * norm;
-                a2 = (V - sqrt(2 * V) * K + K * K) * norm;
-                b1 = 2 * (K * K - 1) * norm;
-                b2 = (1 - SQ * K + K * K) * norm;
-            } else { // cut
-                norm = 1 / (V + sqrt(2 * V) * K + K * K);
-                a0 = (1 + SQ * K + K * K) * norm;
-                a1 = 2 * (K * K - 1) * norm;
-                a2 = (1 - SQ * K + K * K) * norm;
-                b1 = 2 * (K * K - V) * norm;
-                b2 = (V - sqrt(2 * V) * K + K * K) * norm;
-            }
-            break;
-
-        default:
-            break;
+            default:
+                b0_tmp = 1.0f;
+                b1_tmp = 0.0f;
+                b2_tmp = 0.0f;
+                a0_tmp = 1.0f;
+                a1_tmp = 0.0f;
+                a2_tmp = 0.0f;
+                break;
         }
 
-        filter.a0 = a0;
-        filter.a1 = a1;
-        filter.a2 = a2;
-        filter.b1 = b1;
-        filter.b2 = b2;
+        float invA0 = 1.0f / a0_tmp;
+
+        filter.b0 = b0_tmp * invA0;
+        filter.b1 = b1_tmp * invA0;
+        filter.b2 = b2_tmp * invA0;
+        filter.a1 = a1_tmp * invA0;
+        filter.a2 = a2_tmp * invA0;
     }
 
     void cleanMemory() {
-        // low shelf
-        filterLowShelf.dataIn[0] = 0;
-        filterLowShelf.dataIn[1] = 0;
-        filterLowShelf.dataIn[2] = 0;
+        filterLowShelf.x1 = 0;
+        filterLowShelf.x2 = 0;
+        filterLowShelf.y1 = 0;
+        filterLowShelf.y2 = 0;
 
-        filterLowShelf.dataOut[0] = 0;
-        filterLowShelf.dataOut[1] = 0;
-        filterLowShelf.dataOut[2] = 0;
-        // high shelf
-        filterHighShelf.dataIn[0] = 0;
-        filterHighShelf.dataIn[1] = 0;
-        filterHighShelf.dataIn[2] = 0;
+        filterHighShelf.x1 = 0;
+        filterHighShelf.x2 = 0;
+        filterHighShelf.y1 = 0;
+        filterHighShelf.y2 = 0;
 
-        filterHighShelf.dataOut[0] = 0;
-        filterHighShelf.dataOut[1] = 0;
-        filterHighShelf.dataOut[2] = 0;
-        // peak
         for (uint8_t i = 0; i < 4; i++) {
-            filterPeak[i].dataIn[0] = 0;
-            filterPeak[i].dataIn[1] = 0;
-            filterPeak[i].dataIn[2] = 0;
-
-            filterPeak[i].dataOut[0] = 0;
-            filterPeak[i].dataOut[1] = 0;
-            filterPeak[i].dataOut[2] = 0;
+            filterPeak[i].x1 = 0;
+            filterPeak[i].x2 = 0;
+            filterPeak[i].y1 = 0;
+            filterPeak[i].y2 = 0;
         }
     }
 };
+
+static inline float processEqBiquad(EqFilter& filter_, float input_, bool active_) {
+    if (!active_) return input_;
+
+    float output = (filter_.b0 * input_) + (filter_.b1 * filter_.x1) + (filter_.b2 * filter_.x2) - (filter_.a1 * filter_.y1) - (filter_.a2 * filter_.y2) + EQ_ANTI_DENORMAL;
+
+    filter_.x2 = filter_.x1;
+    filter_.x1 = input_;
+    filter_.y2 = filter_.y1;
+    filter_.y1 = output;
+
+    return output;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 /* Filter Constants ----------------------------------------------------------*/
@@ -1616,6 +1744,8 @@ const uint8_t kInitialFilterDry = 0;
 const uint8_t kInitialFilterWet = 20;
 
 const uint8_t kFilterLibrarySize = 2;
+
+#define FILTER_ANTI_DENORMAL 1.0e-18f
 
 typedef enum {
     FIL_OFF = 0x00,
@@ -1736,14 +1866,16 @@ struct Filter {
     const bool limitMix = true;
     const uint8_t limitMixData = 30;
 
-    float a0;
-    float a1;
-    float a2;
-    float b1;
-    float b2;
+    float b0 = 1.0f;
+    float b1 = 0.0f;
+    float b2 = 0.0f;
+    float a1 = 0.0f;
+    float a2 = 0.0f;
 
-    int32_t dataIn[3] = {0};
-    int32_t dataOut[3] = {0};
+    float x1 = 0.0f;
+    float x2 = 0.0f;
+    float y1 = 0.0f;
+    float y2 = 0.0f;
 
     void initialize() {
         active = kInitialFilterActive;
@@ -1754,68 +1886,93 @@ struct Filter {
         dry = kInitialFilterDry;
         wet = kInitialFilterWet;
 
+        dryFloat = kFilterMixDataLibrary[dry].data;
+        wetFloat = kFilterMixDataLibrary[wet].data;
+
         calculateCoef();
         cleanMemory();
     }
 
     void calculateCoef() {
-        uint32_t sampleRate = 44100;
-        uint32_t frequency = kFilterFreqDataLibrary[freq].data;
+        float frequency = (float)kFilterFreqDataLibrary[freq].data;
         float Q = kFilterResDataLibrary[res].data;
-        float norm;
-
-        float K = tan(M_PI * frequency / sampleRate);
+        float cosw0, alpha;
+        float b0_tmp, b1_tmp, b2_tmp;
+        float a0_tmp, a1_tmp, a2_tmp;
+        float normFreq = frequency * kInvSampleRate;
+        cosw0 = cosFast(normFreq);
+        float sinw0 = sinFast(normFreq);
+        alpha = sinw0 / (2.0f * Q);
 
         switch (type) {
         case FIL_OFF:
+            b0_tmp = 1.0f;
+            b1_tmp = 0.0f;
+            b2_tmp = 0.0f;
+            a0_tmp = 1.0f;
+            a1_tmp = 0.0f;
+            a2_tmp = 0.0f;
             break;
 
         case FIL_LPF:
-            norm = 1.0f / (1.0f + K / Q + K * K);
-            a0 = K * K * norm;
-            a1 = 2.0f * a0;
-            a2 = a0;
-            b1 = 2.0f * (K * K - 1.0f) * norm;
-            b2 = (1.0f - K / Q + K * K) * norm;
+            b0_tmp = (1.0f - cosw0) * 0.5f;
+            b1_tmp = 1.0f - cosw0;
+            b2_tmp = (1.0f - cosw0) * 0.5f;
+            a0_tmp = 1.0f + alpha;
+            a1_tmp = -2.0f * cosw0;
+            a2_tmp = 1.0f - alpha;
             break;
 
         case FIL_HPF:
-            norm = 1 / (1 + K / Q + K * K);
-            a0 = 1 * norm;
-            a1 = -2 * a0;
-            a2 = a0;
-            b1 = 2 * (K * K - 1) * norm;
-            b2 = (1 - K / Q + K * K) * norm;
+            b0_tmp = (1.0f + cosw0) * 0.5f;
+            b1_tmp = -(1.0f + cosw0);
+            b2_tmp = (1.0f + cosw0) * 0.5f;
+            a0_tmp = 1.0f + alpha;
+            a1_tmp = -2.0f * cosw0;
+            a2_tmp = 1.0f - alpha;
             break;
 
         case FIL_BPF:
-            norm = 1 / (1 + K / Q + K * K);
-            a0 = K / Q * norm;
-            a1 = 0;
-            a2 = -a0;
-            b1 = 2 * (K * K - 1) * norm;
-            b2 = (1 - K / Q + K * K) * norm;
+            b0_tmp = alpha;
+            b1_tmp = 0.0f;
+            b2_tmp = -alpha;
+            a0_tmp = 1.0f + alpha;
+            a1_tmp = -2.0f * cosw0;
+            a2_tmp = 1.0f - alpha;
             break;
 
         case FIL_BSF:
-            norm = 1 / (1 + K / Q + K * K);
-            a0 = (1 + K * K) * norm;
-            a1 = 2 * (K * K - 1) * norm;
-            a2 = a0;
-            b1 = a1;
-            b2 = (1 - K / Q + K * K) * norm;
+            b0_tmp = 1.0f;
+            b1_tmp = -2.0f * cosw0;
+            b2_tmp = 1.0f;
+            a0_tmp = 1.0f + alpha;
+            a1_tmp = -2.0f * cosw0;
+            a2_tmp = 1.0f - alpha;
+            break;
+
+        default:
+            b0_tmp = 1.0f;
+            b1_tmp = 0.0f;
+            b2_tmp = 0.0f;
+            a0_tmp = 1.0f;
+            a1_tmp = 0.0f;
+            a2_tmp = 0.0f;
             break;
         }
+
+        float invA0 = 1.0f / a0_tmp;
+        b0 = b0_tmp * invA0;
+        b1 = b1_tmp * invA0;
+        b2 = b2_tmp * invA0;
+        a1 = a1_tmp * invA0;
+        a2 = a2_tmp * invA0;
     }
 
     void cleanMemory() {
-        dataIn[0] = 0;
-        dataIn[1] = 0;
-        dataIn[2] = 0;
-
-        dataOut[0] = 0;
-        dataOut[1] = 0;
-        dataOut[2] = 0;
+        x1 = 0.0f;
+        x2 = 0.0f;
+        y1 = 0.0f;
+        y2 = 0.0f;
     }
 
     Filter(uint8_t num_) : num(num_) {}
@@ -1889,6 +2046,8 @@ struct Delay {
     float time;
     float level;
     float feedback;
+    const float dampingAlpha = 0.18f;
+    float lastFeedbackSample = 0.0f;
 
     uint32_t lag;
     uint32_t playInterval;
@@ -1919,6 +2078,7 @@ struct Delay {
         lag = ((60 * kAudioSampleRate) / kInitialTempo) * kDelayTimeDataLibrary[kInitialDelayTime].data;
         playInterval = 0;
         recordInterval = lag;
+        lastFeedbackSample = 0.0f;
     }
 
     void update(uint16_t tempo) {
@@ -1929,7 +2089,9 @@ struct Delay {
         playInterval = playInterval_;
     }
 
-    void cleanMemory() {}
+    void cleanMemory() {
+        lastFeedbackSample = 0.0f;
+    }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2017,6 +2179,7 @@ struct Chorus {
     float depth;
     uint16_t recordInterval;
     const float delayCoef[2] = {1, 0.75};
+    const float balance = 0.92f;
     ChorusDelay chorusDelay[2];
 
     const bool limitMix = true;
@@ -2159,6 +2322,7 @@ struct Flanger {
     float shiftMin;
     float shiftMax;
     float shiftInc;
+    const float feedbackBlend = 0.90f;
 
     const bool limitMix = true;
     const uint8_t limitMixData = 30;
@@ -2277,6 +2441,7 @@ struct Phaser {
     float ff[2] = {0, 0};
     float fb[2] = {0, 0};
     float Q = 0.5;
+    const float wetStageGain = 0.90f;
 
     const bool limitMix = true;
     const uint8_t limitMixData = 30;
@@ -2392,6 +2557,7 @@ struct Compressor {
     float attackAlpha;
     float releaseAlpha;
     float gainSmoothPrev;
+    const float floorDb = -96.0f;
 
     void initialize() {
         reset();
@@ -2502,6 +2668,7 @@ struct Expander {
     float attackAlpha;
     float releaseAlpha;
     float gainSmoothPrev;
+    const float floorDb = -144.0f;
 
     void initialize() {
         reset();
@@ -2598,6 +2765,8 @@ struct Overdrive {
     float thresholddB;
     float threshold;
     float tone;
+    const float preFilterAlpha = 0.08f;
+    float hpState = 0.0f;
 
     const bool limitMix = true;
     const uint8_t limitMixData = 30;
@@ -2610,8 +2779,8 @@ struct Overdrive {
     float b1;
     float b2;
 
-    int32_t dataIn[3] = {0};
-    int32_t dataOut[3] = {0};
+    float dataIn[3] = {0.0f};
+    float dataOut[3] = {0.0f};
 
     void initialize() {
         reset();
@@ -2632,6 +2801,7 @@ struct Overdrive {
 
         gain = pow(10.0f, gaindB / 20.0f);
         threshold = pow(10.0f, thresholddB / 20.0f);
+        hpState = 0.0f;
 
         calculateFilterCoef();
     }
@@ -2657,6 +2827,7 @@ struct Overdrive {
     }
 
     void cleanMemory() {
+        hpState = 0;
         dataIn[0] = 0;
         dataIn[1] = 0;
         dataIn[2] = 0;
@@ -2730,6 +2901,7 @@ struct Distortion {
     float thresholddB;
     float threshold;
     float tone;
+    const float bias = 0.02f;
 
     const bool limitMix = true;
     const uint8_t limitMixData = 30;
@@ -2742,8 +2914,8 @@ struct Distortion {
     float b1;
     float b2;
 
-    int32_t dataIn[3] = {0};
-    int32_t dataOut[3] = {0};
+    float dataIn[3] = {0.0f};
+    float dataOut[3] = {0.0f};
 
     void initialize() {
         reset();
@@ -2875,6 +3047,8 @@ struct Bitcrusher {
     int32_t limitPos;
     int32_t limitNeg;
     int32_t sampleData;
+    const float smoothAlpha = 0.20f;
+    float lastOutput = 0.0f;
 
     const bool limitMix = true;
     const uint8_t limitMixData = 30;
@@ -2919,6 +3093,7 @@ struct Bitcrusher {
         limitNeg = -limitPos;
 
         sampleData = 0;
+        lastOutput = 0.0f;
     }
 
     void update() {
@@ -2940,9 +3115,13 @@ struct Bitcrusher {
         limitMultiplier = pow(10.0, threshold / 20.0);
         limitPos = limitMultiplier * INT24_MAX;
         limitNeg = -limitPos;
+
+        lastOutput = 0.0f;
     }
 
-    void cleanMemory() {}
+    void cleanMemory() {
+        lastOutput = 0.0f;
+    }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3115,7 +3294,7 @@ struct Effect {
 
     uint32_t delayAddress;
     uint32_t chorusAddress;
-    int32_t flangerBuffer[kFlangerBufferSize];
+    float flangerBuffer[kFlangerBufferSize];
 
     void initialize() {
         switch (num) {
@@ -3496,6 +3675,8 @@ const float kInitialReverbCFeedback = 0.84;
 const float kInitialReverbCDecay1 = 0.20;
 const float kInitialReverbCDecay2 = 0.80;
 
+#define REVERB_ANTI_DENORMAL 1.0e-9f
+
 struct ReverbSizeData {
     char nameShortR[5];
     float data;
@@ -3609,14 +3790,14 @@ struct Reverb {
     uint16_t preDelay_recordInterval;
 
     const static uint16_t kPreDelayBufferSize = 4500;
-    int32_t preDelayBuffer[kPreDelayBufferSize] = {0};
+    float preDelayBuffer[kPreDelayBufferSize] = {0.0f};
 
     uint16_t surround_lag;
     uint16_t surround_playInterval;
     uint16_t surround_recordInterval;
 
     const static uint16_t kSurroundBufferSize = 900;
-    int32_t surroundBuffer[kSurroundBufferSize] = {0};
+    float surroundBuffer[kSurroundBufferSize] = {0.0f};
 
     const static uint16_t comb1Size = 1116;
     const static uint16_t comb2Size = 1188;
@@ -3636,32 +3817,32 @@ struct Reverb {
     uint16_t comb7Index = 0;
     uint16_t comb8Index = 0;
 
-    int32_t comb1Filter = 0;
-    int32_t comb2Filter = 0;
-    int32_t comb3Filter = 0;
-    int32_t comb4Filter = 0;
-    int32_t comb5Filter = 0;
-    int32_t comb6Filter = 0;
-    int32_t comb7Filter = 0;
-    int32_t comb8Filter = 0;
+    float comb1Filter = 0.0f;
+    float comb2Filter = 0.0f;
+    float comb3Filter = 0.0f;
+    float comb4Filter = 0.0f;
+    float comb5Filter = 0.0f;
+    float comb6Filter = 0.0f;
+    float comb7Filter = 0.0f;
+    float comb8Filter = 0.0f;
 
-    int32_t comb1Out = 0;
-    int32_t comb2Out = 0;
-    int32_t comb3Out = 0;
-    int32_t comb4Out = 0;
-    int32_t comb5Out = 0;
-    int32_t comb6Out = 0;
-    int32_t comb7Out = 0;
-    int32_t comb8Out = 0;
+    float comb1Out = 0.0f;
+    float comb2Out = 0.0f;
+    float comb3Out = 0.0f;
+    float comb4Out = 0.0f;
+    float comb5Out = 0.0f;
+    float comb6Out = 0.0f;
+    float comb7Out = 0.0f;
+    float comb8Out = 0.0f;
 
-    int32_t comb1Buffer[comb1Size];
-    int32_t comb2Buffer[comb2Size];
-    int32_t comb3Buffer[comb3Size];
-    int32_t comb4Buffer[comb4Size];
-    int32_t comb5Buffer[comb5Size];
-    int32_t comb6Buffer[comb6Size];
-    int32_t comb7Buffer[comb7Size];
-    int32_t comb8Buffer[comb8Size];
+    float comb1Buffer[comb1Size];
+    float comb2Buffer[comb2Size];
+    float comb3Buffer[comb3Size];
+    float comb4Buffer[comb4Size];
+    float comb5Buffer[comb5Size];
+    float comb6Buffer[comb6Size];
+    float comb7Buffer[comb7Size];
+    float comb8Buffer[comb8Size];
 
     float combFeedback; // 0.70 - 0.98
     float combDecay1;   // 0.00 - 0.40
@@ -3677,15 +3858,15 @@ struct Reverb {
     uint16_t apass3Index = 0;
     uint16_t apass4Index = 0;
 
-    int32_t apass1Out = 0;
-    int32_t apass2Out = 0;
-    int32_t apass3Out = 0;
-    int32_t apass4Out = 0;
+    float apass1Out = 0.0f;
+    float apass2Out = 0.0f;
+    float apass3Out = 0.0f;
+    float apass4Out = 0.0f;
 
-    int32_t apass1Buffer[apass1Size];
-    int32_t apass2Buffer[apass2Size];
-    int32_t apass3Buffer[apass3Size];
-    int32_t apass4Buffer[apass4Size];
+    float apass1Buffer[apass1Size];
+    float apass2Buffer[apass2Size];
+    float apass3Buffer[apass3Size];
+    float apass4Buffer[apass4Size];
 
     float apassFeedback = 0.5;
 
@@ -3753,13 +3934,13 @@ struct Reverb {
     }
 
     void setSize(float size_) {
-        if ((size_ <= 1.0f) && (size >= 0.0f)) {
+        if ((size_ <= 1.0f) && (size_ >= 0.0f)) {
             combFeedback = (size_ * 0.28) + 0.70;
         }
     }
 
     void setDecay(float decay_) {
-        if ((decay_ <= 1.0f) && (decay >= 0.0f)) {
+        if ((decay_ <= 1.0f) && (decay_ >= 0.0f)) {
             combDecay1 = decay_ * 0.40;
             combDecay2 = 1.0 - combDecay1;
         }
@@ -3781,6 +3962,30 @@ struct Reverb {
         surround_playInterval = playInterval_;
     }
 };
+
+static inline float processReverbComb(float* buffer, uint16_t& index, const uint16_t size, float& filterState, float input, float feedback, float decay1, float decay2) {
+    float output = buffer[index];
+
+    filterState = (output * decay2) + (filterState * decay1);
+    buffer[index] = input + (filterState * feedback);
+
+    if (++index >= size)
+        index = 0;
+
+    return output;
+}
+
+static inline float processReverbAllpass(float* buffer, uint16_t& index, const uint16_t size, float input, float feedback) {
+    float bufferedValue = buffer[index];
+    float output = bufferedValue - input;
+
+    buffer[index] = input + (bufferedValue * feedback);
+
+    if (++index >= size)
+        index = 0;
+
+    return output;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 /* Layer Constants -----------------------------------------------------------*/
@@ -3915,8 +4120,9 @@ struct SampleData {
 };
 
 struct SampleSector {
-    uint32_t size;
+    volatile uint32_t size;
     float normMultiplier = 1.0f;
+    volatile bool writeMode = false;
 };
 
 struct riff_chunk {
@@ -4140,12 +4346,13 @@ struct Layer {
     struct SampleData sampleLoadedData;
     struct WavData wavLoadedData;
 
-    uint8_t playSampleSector = 0;
+    volatile uint8_t playSampleSector = 0;
     uint8_t writeSampleSector = 0;
 
     SampleSector sampleSector[2];
 
     bool samplePlay = false;
+    volatile bool sampleLoading = false;
 
     Layer(uint8_t number_) : number(number_) {}
     ~Layer() {}
@@ -4157,17 +4364,17 @@ struct Layer {
 
 struct MetroPlayData {
     bool active;
+    bool barMeasure;
     uint32_t counter;
     uint32_t counterMax;
-    uint32_t ramAddress;
     float volumeMultiplier;
 };
 
 struct BeatPlayData {
-    bool active;
+    volatile bool active;
     float counter;
-    int32_t counterMax;
-    uint32_t ramAddress;
+    volatile int32_t counterMax;
+    volatile uint32_t ramAddress;
     float volumeMultiplier;
     uint8_t speed;
     bool reverse;

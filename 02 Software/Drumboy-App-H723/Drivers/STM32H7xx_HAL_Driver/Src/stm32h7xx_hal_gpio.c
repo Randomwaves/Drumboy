@@ -162,7 +162,7 @@
   *         the configuration information for the specified GPIO peripheral.
   * @retval None
   */
-void HAL_GPIO_Init(GPIO_TypeDef  *GPIOx, GPIO_InitTypeDef *GPIO_Init)
+void HAL_GPIO_Init(GPIO_TypeDef  *GPIOx, const GPIO_InitTypeDef *GPIO_Init)
 {
   uint32_t position = 0x00U;
   uint32_t iocurrent;
@@ -208,7 +208,8 @@ void HAL_GPIO_Init(GPIO_TypeDef  *GPIOx, GPIO_InitTypeDef *GPIO_Init)
         GPIOx->OTYPER = temp;
       }
 
-      if ((GPIO_Init->Mode & GPIO_MODE) != MODE_ANALOG)
+      if (((GPIO_Init->Mode & GPIO_MODE) != MODE_ANALOG) ||
+          (((GPIO_Init->Mode & GPIO_MODE) == MODE_ANALOG) && (GPIO_Init->Pull != GPIO_PULLUP)))
       {
        /* Check the Pull parameter */
        assert_param(IS_GPIO_PULL(GPIO_Init->Pull));
@@ -229,7 +230,7 @@ void HAL_GPIO_Init(GPIO_TypeDef  *GPIOx, GPIO_InitTypeDef *GPIO_Init)
 
         /* Configure Alternate function mapped with the current IO */
         temp = GPIOx->AFR[position >> 3U];
-        temp &= ~(0xFU << ((position & 0x07U) * 4U));
+        temp &= ~(0xFUL << ((position & 0x07U) * 4U));
         temp |= ((GPIO_Init->Alternate) << ((position & 0x07U) * 4U));
         GPIOx->AFR[position >> 3U] = temp;
       }
@@ -347,7 +348,7 @@ void HAL_GPIO_DeInit(GPIO_TypeDef  *GPIOx, uint32_t GPIO_Pin)
       GPIOx->MODER |= (GPIO_MODER_MODE0 << (position * 2U));
 
       /* Configure the default Alternate Function in current IO */
-      GPIOx->AFR[position >> 3U] &= ~(0xFU << ((position & 0x07U) * 4U)) ;
+      GPIOx->AFR[position >> 3U] &= ~(0xFUL << ((position & 0x07U) * 4U)) ;
 
       /* Deactivate the Pull-up and Pull-down resistor for the current IO */
       GPIOx->PUPDR &= ~(GPIO_PUPDR_PUPD0 << (position * 2U));
@@ -386,7 +387,7 @@ void HAL_GPIO_DeInit(GPIO_TypeDef  *GPIOx, uint32_t GPIO_Pin)
   *         This parameter can be GPIO_PIN_x where x can be (0..15).
   * @retval The input port pin value.
   */
-GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
+GPIO_PinState HAL_GPIO_ReadPin(const GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
 {
   GPIO_PinState bitstatus;
 

@@ -69,61 +69,40 @@ void Dac::writeRegisterMask(uint16_t reg, uint16_t mask, uint16_t shift, uint16_
 }
 
 void Dac::initialize() {
-    /*
-    if (HAL_I2C_IsDeviceReady(&hi2c3, SGTL5000_I2C_ADDRESS, 1, 10) == HAL_OK) {
-        // HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET);
+    if (HAL_I2C_IsDeviceReady(&hi2c3, SGTL5000_I2C_ADDRESS, 1, 10) != HAL_OK) {
+        return;
     }
-    */
 
+    // Pre-power pop reduction.
     writeRegisterMask(ANA_HP_CTRL_REG, ANA_HP_CTRL_HP_VOL_LEFT_MASK, ANA_HP_CTRL_HP_VOL_LEFT_SHIFT, 0x7F);
     writeRegisterMask(ANA_HP_CTRL_REG, ANA_HP_CTRL_HP_VOL_RIGHT_MASK, ANA_HP_CTRL_HP_VOL_RIGHT_SHIFT, 0x7F);
 
+    // Reference stabilization and analog baseline config.
     writeRegisterFull(ANA_POWER_REG, 0x4060);
     writeRegisterFull(LINREG_CTRL_REG, 0x006C);
     writeRegisterFull(REF_CTRL_REG, 0x01F2);
     writeRegisterFull(LINE_OUT_CTRL_REG, 0x0F22);
-    writeRegisterFull(SHORT_CTRL_REG, 0x4446);
-    writeRegisterFull(ANA_CTRL_REG, 0x0137);
+    writeRegisterFull(SHORT_CTRL_REG, 0x0000);
+    writeRegisterFull(ANA_CTRL_REG, 0x0035);
 
-    // DAP Control
-    writeRegisterMask(SSS_CTRL_REG, SSS_CTRL_DAP_MIX_SELECT_MASK, SSS_CTRL_DAP_MIX_SELECT_SHIFT, 0x01);
-    writeRegisterMask(SSS_CTRL_REG, SSS_CTRL_DAP_SELECT_MASK, SSS_CTRL_DAP_SELECT_SHIFT, 0x01);
-    writeRegisterMask(SSS_CTRL_REG, SSS_CTRL_DAC_SELECT_MASK, SSS_CTRL_DAC_SELECT_SHIFT, 0x01);
-    writeRegisterMask(DAP_CONTROL_REG, DAP_CONTROL_DAP_EN_MASK, DAP_CONTROL_DAP_EN_SHIFT, 0x01);
-
-    writeRegisterMask(DAP_AUDIO_EQ_REG, DAP_AUDIO_EQ_EN_MASK, DAP_AUDIO_EQ_EN_SHIFT, 0x00);
-
-    // writeRegisterMask(DAP_PEQ_REG, DAP_PEQ_EN_MASK, DAP_PEQ_EN_SHIFT, 0x07);
-
+    // Direct I2S -> DAC route, DAP bypassed at startup.
+    writeRegisterFull(SSS_CTRL_REG, 0x0010);
+    writeRegisterMask(DAP_CONTROL_REG, DAP_CONTROL_DAP_EN_MASK, DAP_CONTROL_DAP_EN_SHIFT, 0x00);
     writeRegisterMask(REF_CTRL_REG, REF_CTRL_SMALL_POP_MASK, REF_CTRL_SMALL_POP_SHIFT, 0x01);
 
     __HAL_UNLOCK(&hi2s3);
     __HAL_I2S_ENABLE(&hi2s3);
-    HAL_I2S_Transmit_DMA(&hi2s3, (uint16_t*)i2s_data, 4);
+    HAL_I2S_Transmit_DMA(&hi2s3, (uint16_t*)i2s_txBuffer, I2S_TOTAL_BUFFER_SIZE);
 
-    writeRegisterFull(ANA_POWER_REG, 0x40FF);
-    writeRegisterFull(DIG_POWER_REG, 0x0073);
+    // Analog/Digital power-up for playback path.
+    writeRegisterFull(ANA_POWER_REG, 0x40BD);
+    writeRegisterFull(DIG_POWER_REG, 0x0021);
 
-    // HAL_Delay(400);
-
-    writeRegisterMask(CLK_CTRL_REG, CLK_CTRL_SYS_FS_MASK, CLK_CTRL_SYS_FS_SHIFT, 0x01);  // 0x00 = 32 kHz, 0x01 = 44.1 kHz, 0x02 = 48 kHz, 0x03 = 96 kHz
-    writeRegisterMask(I2S_CTRL_REG, I2S_CTRL_DLEN_MASK, I2S_CTRL_DLEN_SHIFT, 0x01);      // 0x00 = 32 bits, 0x01 = 24 bits, 0x02 = 20 bits, 0x03 = 16 bits
+    // I2S clock and data format.
+    writeRegisterMask(CLK_CTRL_REG, CLK_CTRL_SYS_FS_MASK, CLK_CTRL_SYS_FS_SHIFT, 0x01);
+    writeRegisterMask(I2S_CTRL_REG, I2S_CTRL_DLEN_MASK, I2S_CTRL_DLEN_SHIFT, 0x00);
     writeRegisterMask(I2S_CTRL_REG, I2S_CTRL_SCLK_INV_MASK, I2S_CTRL_SCLK_INV_SHIFT, 0x00);
 
-    writeRegisterMask(SSS_CTRL_REG, SSS_CTRL_DAP_SELECT_MASK, SSS_CTRL_DAP_SELECT_SHIFT, 0x01);  // 0x01
-    writeRegisterMask(SSS_CTRL_REG, SSS_CTRL_DAC_SELECT_MASK, SSS_CTRL_DAC_SELECT_SHIFT, 0x03);  // 0x03
-    writeRegisterMask(ANA_CTRL_REG, ANA_CTRL_SELECT_HP_MASK, ANA_CTRL_SELECT_HP_SHIFT, 0x00);
-
-    writeRegisterMask(DAP_CONTROL_REG, DAP_CONTROL_DAP_EN_MASK, DAP_CONTROL_DAP_EN_SHIFT, 0x01);
-
-    // AVC
-    // enableAVC();
-    // Surround
-    // enableSurround();
-    // setSurround(0x07);
-    // Bass Enhance
-    // disableBassEnhance();
-    // setBassEnhance(0x05, 0x1F);
     // DAC Volume
     writeRegisterMask(ADCDAC_CTRL_REG, ADCDAC_CTRL_DAC_MUTE_LEFT_MASK, ADCDAC_CTRL_DAC_MUTE_LEFT_SHIFT, 0x00);
     writeRegisterMask(ADCDAC_CTRL_REG, ADCDAC_CTRL_DAC_MUTE_RIGHT_MASK, ADCDAC_CTRL_DAC_MUTE_RIGHT_SHIFT, 0x00);
@@ -311,7 +290,12 @@ void setLineoutVolume(uint8_t dBData) {}
 
 void Dac::audioOn() {}
 
-void Dac::audioOff() {}
+void Dac::audioOff() {
+    muteHeadphone();
+    muteLineout();
+    HAL_I2S_DMAStop(&hi2s3);
+    memset(i2s_txBuffer, 0, sizeof(i2s_txBuffer));
+}
 
 void Dac::enableAVC() {
     writeRegisterMask(DAP_AVC_CTRL_REG, DAP_AVC_CTRL_EN_MASK, DAP_AVC_CTRL_EN_SHIFT, 0x01);

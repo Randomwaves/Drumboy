@@ -82,6 +82,9 @@ DRESULT disk_read (
 {
   DRESULT res;
 
+  if (disk.drv[pdrv] == 0)
+    return RES_NOTRDY;
+
   res = disk.drv[pdrv]->disk_read(disk.lun[pdrv], buff, sector, count);
   return res;
 }
@@ -103,6 +106,9 @@ DRESULT disk_write (
 )
 {
   DRESULT res;
+
+  if (disk.drv[pdrv] == 0)
+    return RES_NOTRDY;
 
   res = disk.drv[pdrv]->disk_write(disk.lun[pdrv], buff, sector, count);
   return res;
